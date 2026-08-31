@@ -16,7 +16,7 @@ const JWT_SECRET = 'super-secret-development-key-change-me';
 // Set up your admin credentials.
 // We hash the password on startup so it isn't sitting in plain text in memory.
 const ADMIN_USERNAME = 'admin';
-const ADMIN_PASSWORD = 'thisShouldBeEncryptedPasswordDoNotForgetToChangeThisEverySixMonths'; // Change this!
+const ADMIN_PASSWORD = 'admin'; // Change this!
 const ADMIN_PASSWORD_HASH = bcrypt.hashSync(ADMIN_PASSWORD, 10);
 
 // The base directory on your laptop you want to manage
