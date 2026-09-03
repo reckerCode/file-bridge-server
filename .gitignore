@@ -6,3 +6,4 @@ coverage/
 .vscode/
 /.idea/
 /RemoteFileManager-Bruno
+storage/
