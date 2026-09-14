@@ -3,31 +3,12 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
+const { auth } = require('express-oauth2-jwt-bearer');
 
 const app = express();
 const PORT = 3000;
 
-const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
-
-// 🔒 SECURITY: Change this to a long, random string!
-const JWT_SECRET = 'super-secret-development-key-change-me';
-
-// Set up your admin credentials.
-// We hash the password on startup so it isn't sitting in plain text in memory.
-const ADMIN_USERNAME = 'admin';
-const ADMIN_PASSWORD = 'admin'; // Change this!
-const ADMIN_PASSWORD_HASH = bcrypt.hashSync(ADMIN_PASSWORD, 10);
-
-// The base directory on your laptop you want to manage
-const STORAGE_ROOT = path.resolve(__dirname, 'storage');
-
-// Ensure the storage root exists
-if (!fs.existsSync(STORAGE_ROOT)) {
-    fs.mkdirSync(STORAGE_ROOT, { recursive: true });
-}
-
-// Allow requests from your Vite dev server (Single CORS declaration)
+// 1. CORS Configuration
 app.use(cors({
     origin: 'http://localhost:5173',
     credentials: true,
@@ -37,113 +18,87 @@ app.use(cors({
 
 app.use(express.json());
 
-// -------------------------------------------------------------
-// Security Helper: Prevent Directory Traversal Attacks
-// -------------------------------------------------------------
-function resolveSafePath(userPath = '') {
-    // Normalize and resolve the absolute path
-    const safePath = path.resolve(STORAGE_ROOT, userPath.replace(/^(\.\.(\/|\\|$))+/, ''));
+// The base directory you want to manage
+const STORAGE_ROOT = path.resolve(__dirname, 'storage');
+if (!fs.existsSync(STORAGE_ROOT)) {
+    fs.mkdirSync(STORAGE_ROOT, { recursive: true });
+}
 
-    // Ensure target path stays strictly inside STORAGE_ROOT
+function resolveSafePath(userPath = '') {
+    const safePath = path.resolve(STORAGE_ROOT, userPath.replace(/^(\.\.(\/|\\|$))+/, ''));
     if (!safePath.startsWith(STORAGE_ROOT)) {
         throw new Error('Access denied: Unauthorized directory path.');
     }
-
     return safePath;
 }
-// -------------------------------------------------------------
-// Authentication: Login Route
-// -------------------------------------------------------------
-app.post('/api/login', (req, res) => {
-    const { username, password } = req.body;
 
-    // Verify username and check if the password matches the hash
-    if (username === ADMIN_USERNAME && bcrypt.compareSync(password, ADMIN_PASSWORD_HASH)) {
-        // Generate a token that expires in 24 hours
-        const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: '24h' });
-        res.json({ token });
-    } else {
-        res.status(401).json({ error: 'Invalid username or password' });
-    }
+// -------------------------------------------------------------
+// Security Middleware: Auth0 JWT Validation
+// -------------------------------------------------------------
+// This automatically fetches Auth0 public keys and verifies the token signature
+const authenticateToken = auth({
+    audience: 'http://localhost:3000',
+    issuerBaseURL: 'https://dev-0hhegyynizwv18yv.us.auth0.com/',
+    tokenSigningAlg: 'RS256'
 });
 
 // -------------------------------------------------------------
-// Security Helper: JWT Middleware
+// Security Middleware: Role-Based Access Control (RBAC)
 // -------------------------------------------------------------
-function authenticateToken(req, res, next) {
-    // The frontend must send the token in the "Authorization" header
-    // Format: "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6..."
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
+function requireAdmin(req, res, next) {
+    // The express-oauth2-jwt-bearer library attaches the decoded token to req.auth
+    const payload = req.auth.payload;
 
-    if (!token) {
-        return res.status(401).json({ error: 'Access denied. No token provided.' });
+    // Check for the groups claim (Auth0 sometimes requires custom claims to be namespaced URIs)
+    // Adjust 'groups' to match exactly how you named the claim in the Auth0/Okta dashboard
+    const userGroups = payload['groups'] || payload['http://filebridge.com/groups'] || [];
+
+    if (!userGroups.includes('FileBridge_Admins')) {
+        return res.status(403).json({ error: 'Access denied: Requires Admin privileges.' });
     }
 
-    // Verify the token hasn't been tampered with or expired
-    jwt.verify(token, JWT_SECRET, (err, user) => {
-        if (err) {
-            return res.status(403).json({ error: 'Invalid or expired token. Please log in again.' });
-        }
-        req.user = user; // Attach the user info to the request
-        next(); // Pass control to the actual route handler
-    });
+    next();
 }
 
 // -------------------------------------------------------------
-// 1. List Files and Directories
+// 1. Read-Only Routes (Any authenticated user)
 // -------------------------------------------------------------
 app.get('/api/files', authenticateToken, async (req, res) => {
     try {
         const relativePath = req.query.path || '';
         const targetDir = resolveSafePath(relativePath);
-
         const entries = await fs.promises.readdir(targetDir, { withFileTypes: true });
 
         const fileList = await Promise.all(
             entries.map(async (entry) => {
                 const itemPath = path.join(targetDir, entry.name);
                 let stats = null;
-
-                try {
-                    stats = await fs.promises.stat(itemPath);
-                } catch {
-                    // Ignore unreadable system files/links
-                }
+                try { stats = await fs.promises.stat(itemPath); } catch {}
 
                 return {
                     name: entry.name,
                     isDirectory: entry.isDirectory(),
-                        size: stats ? stats.size : 0,
-                        updatedAt: stats ? stats.mtime : null,
-                        relativePath: path.relative(STORAGE_ROOT, itemPath)
+                    size: stats ? stats.size : 0,
+                    updatedAt: stats ? stats.mtime : null,
+                    relativePath: path.relative(STORAGE_ROOT, itemPath)
                 };
             })
         );
-
-        res.json({
-            currentPath: relativePath,
-            items: fileList
-        });
+        res.json({ currentPath: relativePath, items: fileList });
     } catch (err) {
         res.status(400).json({ error: err.message });
     }
 });
 
-// -------------------------------------------------------------
-// 2. Download File
-// -------------------------------------------------------------
-app.get('/api/download', authenticateToken,  (req, res) => {
+app.get('/api/download', authenticateToken, (req, res) => {
     try {
         const relativePath = req.query.path;
         if (!relativePath) return res.status(400).json({ error: 'Path is required.' });
 
         const filePath = resolveSafePath(relativePath);
-
         if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
             return res.status(404).json({ error: 'File not found.' });
         }
-
         res.download(filePath);
     } catch (err) {
         res.status(400).json({ error: err.message });
@@ -151,35 +106,28 @@ app.get('/api/download', authenticateToken,  (req, res) => {
 });
 
 // -------------------------------------------------------------
-// 3. Upload File
+// 2. Write Routes (Strictly Admins Only)
 // -------------------------------------------------------------
 const storageEngine = multer.diskStorage({
-    destination: (req, file, callbackFunction) => {
+    destination: (req, file, cb) => {
         try {
             const destinationFolder = resolveSafePath(req.body.targetPath || '');
-            callbackFunction(null, destinationFolder);
+            cb(null, destinationFolder);
         } catch (err) {
-            callbackFunction(err);
+            cb(err);
         }
     },
-    filename: (req, file, cb) => {
-        cb(null, file.originalname);
-    }
+    filename: (req, file, cb) => cb(null, file.originalname)
 });
-
 const upload = multer({ storage: storageEngine });
 
-app.post('/api/upload',  authenticateToken, upload.single('file'), (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ error: 'No file uploaded.' });
-    }
+// Note the middleware chain: Authenticate first -> Verify Admin -> Handle Upload
+app.post('/api/upload', authenticateToken, requireAdmin, upload.single('file'), (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
     res.json({ message: 'File uploaded successfully', file: req.file.originalname });
 });
 
-// -------------------------------------------------------------
-// 4. Create Folder
-// -------------------------------------------------------------
-app.post('/api/mkdir',  authenticateToken, authenticateToken, async (req, res) => {
+app.post('/api/mkdir', authenticateToken, requireAdmin, async (req, res) => {
     try {
         const { targetPath, folderName } = req.body;
         if (!folderName) return res.status(400).json({ error: 'Folder name is required.' });
@@ -194,17 +142,12 @@ app.post('/api/mkdir',  authenticateToken, authenticateToken, async (req, res) =
     }
 });
 
-// -------------------------------------------------------------
-// 5. Delete File or Directory
-// -------------------------------------------------------------
-app.delete('/api/delete',  authenticateToken, async (req, res) => {
+app.delete('/api/delete', authenticateToken, requireAdmin, async (req, res) => {
     try {
         const relativePath = req.query.path;
         if (!relativePath) return res.status(400).json({ error: 'Path is required.' });
 
         const targetPath = resolveSafePath(relativePath);
-
-        // Prevent accidental deletion of root storage folder
         if (targetPath === STORAGE_ROOT) {
             return res.status(403).json({ error: 'Cannot delete the storage root directory.' });
         }
@@ -215,7 +158,6 @@ app.delete('/api/delete',  authenticateToken, async (req, res) => {
         } else {
             await fs.promises.unlink(targetPath);
         }
-
         res.json({ message: 'Item deleted successfully' });
     } catch (err) {
         res.status(400).json({ error: err.message });
@@ -224,5 +166,4 @@ app.delete('/api/delete',  authenticateToken, async (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`Remote File Manager backend running at http://localhost:${PORT}`);
-    console.log(`Managing directory: ${STORAGE_ROOT}`);
 });
