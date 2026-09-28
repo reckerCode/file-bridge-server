@@ -7,3 +7,4 @@ coverage/
 /.idea/
 /RemoteFileManager-Bruno
 storage/
+package-lock.json

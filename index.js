@@ -38,7 +38,7 @@ function resolveSafePath(userPath = '') {
 // This automatically fetches Auth0 public keys and verifies the token signature
 const authenticateToken = auth({
     audience: 'http://localhost:3000',
-    issuerBaseURL: 'https://dev-0hhegyynizwv18yv.us.auth0.com/',
+    issuerBaseURL: '',
     tokenSigningAlg: 'RS256'
 });
 
